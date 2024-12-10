@@ -28,7 +28,7 @@ A command-line application for tracking sports bets, calculating profits, and an
 
 1. Clone the repository:
 ```bash
-git clone git@github.com:din77/bets.git
+git clone https://github.com/din77/bets.git
 cd bets
 ```
 
