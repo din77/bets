@@ -1,8 +1,102 @@
 #!/usr/bin/env python3
 
 from datetime import datetime
+import sqlite3
 from typing import List, Optional
 import sys
+import os
+
+class Database:
+    def __init__(self):
+        self.db_path = "bets.db"
+        self.init_database()
+
+    def init_database(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS bets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sport TEXT NOT NULL,
+                    team TEXT NOT NULL,
+                    odds REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    potential_win REAL NOT NULL,
+                    result INTEGER,
+                    date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+
+    def add_bet(self, bet: 'Bet') -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO bets (sport, team, odds, amount, potential_win, date)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (bet.sport, bet.team, bet.odds, bet.amount, bet.potential_win, bet.date))
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_bet_result(self, bet_id: int, result: bool):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE bets
+                SET result = ?
+                WHERE id = ?
+            ''', (1 if result else 0, bet_id))
+            conn.commit()
+
+    def get_pending_bets(self) -> List[tuple]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, sport, team, odds, amount, potential_win
+                FROM bets
+                WHERE result IS NULL
+                ORDER BY date DESC
+            ''')
+            return cursor.fetchall()
+
+    def get_statistics(self) -> dict:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Total bets
+            cursor.execute('SELECT COUNT(*) FROM bets')
+            total_bets = cursor.fetchone()[0]
+            
+            # Completed bets
+            cursor.execute('SELECT COUNT(*), SUM(CASE WHEN result = 1 THEN 1 ELSE 0 END) FROM bets WHERE result IS NOT NULL')
+            completed_row = cursor.fetchone()
+            completed_bets = completed_row[0] or 0
+            wins = completed_row[1] or 0
+            
+            # Financial calculations
+            cursor.execute('''
+                SELECT 
+                    SUM(amount) as total_wagered,
+                    SUM(CASE WHEN result IS NULL THEN amount ELSE 0 END) as pending_wagers,
+                    SUM(CASE WHEN result IS NOT NULL THEN amount ELSE 0 END) as completed_wagers,
+                    SUM(CASE 
+                        WHEN result = 1 THEN potential_win 
+                        WHEN result = 0 THEN -amount 
+                        ELSE 0 
+                    END) as total_profit
+                FROM bets
+            ''')
+            financial = cursor.fetchone()
+            
+            return {
+                'total_bets': total_bets,
+                'completed_bets': completed_bets,
+                'wins': wins,
+                'total_wagered': financial[0] or 0,
+                'pending_wagers': financial[1] or 0,
+                'completed_wagers': financial[2] or 0,
+                'total_profit': financial[3] or 0
+            }
 
 class Bet:
     def __init__(self, sport: str, team: str, odds: float, amount: float):
@@ -19,53 +113,6 @@ class Bet:
             return (self.odds / 100) * self.amount
         else:
             return (100 / abs(self.odds)) * self.amount
-
-    def set_result(self, won: bool):
-        self.result = won
-
-    def get_profit(self) -> float:
-        if self.result is None:
-            return 0
-        if self.result:
-            return self.potential_win
-        return -self.amount
-
-class BettingTracker:
-    def __init__(self):
-        self.bets: List[Bet] = []
-
-    def add_bet(self, bet: Bet):
-        self.bets.append(bet)
-
-    def get_win_rate(self) -> float:
-        completed_bets = [bet for bet in self.bets if bet.result is not None]
-        if not completed_bets:
-            return 0.0
-        wins = sum(1 for bet in completed_bets if bet.result)
-        return (wins / len(completed_bets)) * 100
-
-    def get_total_wagered(self) -> float:
-        return sum(bet.amount for bet in self.bets)
-
-    def get_total_completed_wagers(self) -> float:
-        return sum(bet.amount for bet in self.bets if bet.result is not None)
-
-    def get_pending_wagers(self) -> float:
-        return sum(bet.amount for bet in self.bets if bet.result is None)
-
-    def get_total_profit(self) -> float:
-        return sum(bet.get_profit() for bet in self.bets)
-
-    def get_completed_bets_count(self) -> tuple[int, int]:
-        completed = [bet for bet in self.bets if bet.result is not None]
-        wins = sum(1 for bet in completed if bet.result)
-        return wins, len(completed)
-
-    def get_break_even_amount(self) -> float:
-        total_profit = self.get_total_profit()
-        if total_profit >= 0:
-            return 0
-        return abs(total_profit)
 
 def get_valid_float(prompt: str) -> float:
     while True:
@@ -87,8 +134,25 @@ def get_yes_no_input(prompt: str) -> bool:
             return False
         print("Please enter 'y' or 'n'.")
 
+def display_statistics(stats: dict):
+    print("\nBetting Statistics:")
+    print(f"Total bets placed: {stats['total_bets']}")
+    if stats['completed_bets'] > 0:
+        win_rate = (stats['wins'] / stats['completed_bets']) * 100
+        print(f"Completed bets: {stats['completed_bets']} ({stats['wins']} wins, {stats['completed_bets'] - stats['wins']} losses)")
+        print(f"Win rate: {win_rate:.1f}%")
+    
+    print("\nFinancial Summary:")
+    print(f"Total amount wagered: ${stats['total_wagered']:.2f}")
+    print(f"Pending wagers: ${stats['pending_wagers']:.2f}")
+    print(f"Completed wagers: ${stats['completed_wagers']:.2f}")
+    print(f"Total profit/loss: ${stats['total_profit']:.2f}")
+    
+    if stats['total_profit'] < 0:
+        print(f"Amount needed to break even: ${abs(stats['total_profit']):.2f}")
+
 def main():
-    tracker = BettingTracker()
+    db = Database()
     print("Welcome to the Sports Betting Tracker!")
     
     while True:
@@ -108,48 +172,35 @@ def main():
             amount = get_valid_float("Amount wagered: $")
             
             bet = Bet(sport, team, odds, amount)
-            tracker.add_bet(bet)
+            bet_id = db.add_bet(bet)
             print(f"\nBet recorded! Potential win: ${bet.potential_win:.2f}")
             
         elif choice == '2':
-            if not tracker.bets:
-                print("\nNo bets to update!")
+            pending_bets = db.get_pending_bets()
+            if not pending_bets:
+                print("\nNo pending bets to update!")
                 continue
                 
             print("\nPending bets:")
-            pending_bets = [bet for bet in tracker.bets if bet.result is None]
-            if not pending_bets:
-                print("No pending bets to update!")
-                continue
-                
             for i, bet in enumerate(pending_bets, 1):
-                print(f"{i}. {bet.sport} - {bet.team} (${bet.amount:.2f} @ {bet.odds:+})")
+                bet_id, sport, team, odds, amount, potential_win = bet
+                print(f"{i}. {sport} - {team} (${amount:.2f} @ {odds:+})")
             
             bet_idx = int(input("\nEnter bet number to update: ")) - 1
             if 0 <= bet_idx < len(pending_bets):
                 result = get_yes_no_input("Did the bet win? (y/n): ")
-                pending_bets[bet_idx].set_result(result)
+                db.update_bet_result(pending_bets[bet_idx][0], result)
                 print("Bet updated successfully!")
             else:
                 print("Invalid bet number!")
                 
         elif choice == '3':
-            if not tracker.bets:
+            stats = db.get_statistics()
+            if stats['total_bets'] == 0:
                 print("\nNo bets recorded yet!")
                 continue
-                
-            wins, completed = tracker.get_completed_bets_count()
-            print("\nBetting Statistics:")
-            print(f"Total bets placed: {len(tracker.bets)}")
-            print(f"Completed bets: {completed} ({wins} wins, {completed - wins} losses)")
-            print(f"Win rate: {tracker.get_win_rate():.1f}%")
-            print("\nFinancial Summary:")
-            print(f"Total amount wagered: ${tracker.get_total_wagered():.2f}")
-            print(f"Pending wagers: ${tracker.get_pending_wagers():.2f}")
-            print(f"Completed wagers: ${tracker.get_total_completed_wagers():.2f}")
-            print(f"Total profit/loss: ${tracker.get_total_profit():.2f}")
-            if tracker.get_break_even_amount() > 0:
-                print(f"Amount needed to break even: ${tracker.get_break_even_amount():.2f}")
+            
+            display_statistics(stats)
             
         elif choice == '4':
             print("\nThank you for using Sports Betting Tracker!")
